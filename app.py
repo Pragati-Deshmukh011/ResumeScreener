@@ -9,6 +9,7 @@ from nltk.tag import pos_tag
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import spacy
+import pandas as pd
 
 # Download NLTK resources (only needed once)
 nltk.download('punkt')
@@ -29,8 +30,11 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS candidate_skills
                   (id INTEGER PRIMARY KEY, candidate_name TEXT, skill TEXT)''')
 conn.commit()
 
+# Create an empty dataframe to store the results
+result_df = pd.DataFrame(columns=['Candidate Name', 'Suitable Job Postings'])
+
 # Page layout
-st.title('Resume Screener')
+st.title('Automatic Resume Screener')
 col1, col2, col3 = st.columns([1, 1, 2])
 
 # Insert Resume Section (multiple files)
@@ -42,12 +46,14 @@ with col1:
 with col2:
     st.sidebar.header('Job Posts')
     job_postings_input = st.sidebar.text_area('Enter Job Postings (One per line)')
+
 def extract_name_from_text(text):
     doc = nlp(text)
     for ent in doc.ents:
         if ent.label_ == 'PERSON':
             return ent.text
     return 'Unknown'
+
 def extract_candidate_name(uploaded_file):
     if uploaded_file.type == 'application/pdf':
         pdf_reader = PyPDF2.PdfReader(uploaded_file)
@@ -59,11 +65,11 @@ def extract_candidate_name(uploaded_file):
     elif uploaded_file.type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
         text = docx2txt.process(uploaded_file)
         return extract_name_from_text(text)
-
-
+# Counter for number of resumes processed
+resumes_processed = 0
 # Save data to SQLite database and process resumes for each candidate
 if st.sidebar.button('Screen Resumes'):
-    if uploaded_files:
+    if uploaded_files and job_postings_input:
         job_postings_list = job_postings_input.split('\n')
         st.success('Resumes uploaded successfully!')
 
@@ -88,7 +94,9 @@ if st.sidebar.button('Screen Resumes'):
                 file_content = text
             elif uploaded_file.type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
                 file_content = docx2txt.process(uploaded_file)
-
+            if file_content:
+                # Increment counter for each resume processed
+                resumes_processed += 1
             if file_content:
                 # Tokenize text and extract skills
                 tokens = word_tokenize(file_content)
@@ -107,43 +115,36 @@ if st.sidebar.button('Screen Resumes'):
                                (candidate_name, ', '.join(skills)))
                 conn.commit()
 
+                # Vectorize job postings and candidate skills
+                vectorizer = TfidfVectorizer()
+                candidate_skills_vectorized = vectorizer.fit_transform([', '.join(skills)])
+
+                suitable_job_postings = []
+                for job_posting in job_postings_list:
+                    job_posting_vectorized = vectorizer.transform([job_posting])
+
+                    # Calculate cosine similarity between candidate skills and job posting
+                    similarity_score = cosine_similarity(candidate_skills_vectorized, job_posting_vectorized)[0][0]
+
+                    # If similarity score is above a threshold, add job posting to suitable job postings
+                    if similarity_score >= 0.09:
+                        suitable_job_postings.append(job_posting)
+
+                # Add candidate and suitable job postings to the result dataframe
+                result_df = pd.concat([result_df, pd.DataFrame({'Candidate Name': [candidate_name],
+                                                                'Suitable Job Postings': [', '.join(suitable_job_postings)]})], ignore_index=True)
+
         st.success('Resumes processed successfully!')
 
 # Output Module
 st.header('Screening Output')
 
-# Retrieve candidate names from the database
-cursor.execute('SELECT DISTINCT candidate_name FROM candidate_info')
-candidate_names = [row[0] for row in cursor.fetchall()]
-
-# Process resumes and display output for each candidate
-for candidate_name in candidate_names:
-    st.subheader(f'{candidate_name}\'s Skills:')
-
-    # Retrieve skills from the database for the current candidate
-    cursor.execute('SELECT skill FROM candidate_skills WHERE candidate_name = ?', (candidate_name,))
-    candidate_skills = ', '.join([row[0] for row in cursor.fetchall()])
-    st.write(candidate_skills)
-
-    if job_postings_input:
-        st.subheader('Job Postings')
-        st.write(job_postings_list)
-
-        # Vectorize job postings and candidate skills
-        vectorizer = TfidfVectorizer()
-        job_postings_vectorized = vectorizer.fit_transform(job_postings_list)
-        candidate_skills_vectorized = vectorizer.transform([candidate_skills])
-
-        # Calculate cosine similarity between candidate skills and job postings
-        similarity_scores = cosine_similarity(candidate_skills_vectorized, job_postings_vectorized)
-
-        # Find the most appropriate job posting based on similarity
-        most_appropriate_job_index = similarity_scores.argmax()
-        most_appropriate_job_posting = job_postings_list[most_appropriate_job_index]
-
-        st.subheader('Most Appropriate Job Posting:')
-        st.write(most_appropriate_job_posting)
-
+# Display the result dataframe as a table
+st.subheader('Result Table')
+st.dataframe(result_df)
+# Display number of resumes processed
+st.subheader('Number of Resumes Processed')
+st.write(resumes_processed)
 if st.button('Delete Data'):
     # Delete data from candidate_info table
     cursor.execute('DELETE FROM candidate_info')
@@ -157,5 +158,3 @@ st.sidebar.markdown('Developed by Prerna Gaikwad')
 
 # Close SQLite connection
 conn.close()
-
-
